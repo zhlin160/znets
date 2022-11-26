@@ -1,0 +1,6 @@
+Server:
+  Ip: "0.0.0.0"
+  Port: 9503
+  WorkPoll: 10     #工作池大小
+  MaxConnNum: 102400 #最大连接数
+  Model: "dev"
