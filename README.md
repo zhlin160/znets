@@ -1,2 +1,26 @@
 # znets
-基于Golang轻量级TCP并发服务器框架
+基于Golang简单轻量级TCP并发服务器框架
+
+***
+
+### Example
+***
+```go
+package main
+
+import "github.com/zhlin163/znets"
+
+func main() {
+	//srv := znets.NewServer()
+	srv := znets.NewServerWithOptions(&znets.Options{
+		IP:       "127.0.0.1",
+		Port:     9898,
+		WorkPool: 15,
+	})
+
+	srv.SetEventHandle(&Event{})
+	srv.SetProtoPack(NewMessagePack())
+
+	srv.Run()
+}
+```
