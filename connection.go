@@ -15,7 +15,7 @@ type Connection struct {
 	ConnID uint32
 	//连接状态
 	isClosed bool
-	//接受停止推出状态的channel
+	//写通道退出状态的channel
 	ExitChan chan bool
 	//当前连接的处理方法
 	Handles IHandler

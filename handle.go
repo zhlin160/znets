@@ -3,8 +3,8 @@ package znets
 type Handler struct {
 	Middlewares  []HandlerFunc   //中间件集合
 	abort        bool            //中间件执行中是否有中断
-	workpoolSize uint32          //工作协成池
-	tasks        []chan IRequest //收到请求信道
+	workpoolSize uint32          //工作池
+	tasks        []chan IRequest //收到请求任务通道
 
 	before      HandlerFunc //前置操作
 	after       HandlerFunc //后置操作
