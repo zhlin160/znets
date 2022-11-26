@@ -1,6 +1,6 @@
 package main
 
-import "github.com/zhlin163/znets"
+import "github.com/zhlin160/znets"
 
 type Event struct {
 }

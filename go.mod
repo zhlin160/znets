@@ -1,4 +1,4 @@
-module github.com/zhlin163/znets
+module github.com/zhlin160/znets
 
 go 1.18
 
