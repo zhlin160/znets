@@ -1,7 +1,11 @@
 package znets
 
 import (
+	"bytes"
 	"errors"
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/transform"
+	"io/ioutil"
 	"net"
 	"sync"
 )
@@ -28,10 +32,11 @@ type Connection struct {
 	//保护锁
 	propertyLock sync.RWMutex
 
-	packProto IPack //协议解析
+	packProto IPack           //协议解析
+	connWg    *sync.WaitGroup //进程中协程连接同步等待，用于在需要结束进程时等待处理未完成连接
 }
 
-func NewConnection(server IServer, conn *net.TCPConn, id uint32, handler IHandler) IConnection {
+func NewConnection(server IServer, conn *net.TCPConn, id uint32, handler IHandler, wg *sync.WaitGroup) IConnection {
 	c := &Connection{
 		Conn:     conn,
 		ConnID:   id,
@@ -41,6 +46,8 @@ func NewConnection(server IServer, conn *net.TCPConn, id uint32, handler IHandle
 		dataChan: make(chan []byte),
 		server:   server,
 		property: make(map[string]interface{}),
+
+		connWg: wg,
 	}
 
 	c.server.GetManager().Add(c)
@@ -99,7 +106,8 @@ func (c *Connection) StartReader() {
 			Log.Error("read msg data err:%s", err.Error())
 			break
 		}
-		recvBuff += string(buff[:n])
+		gBbuff, _ := GbToUtf8(buff[:n]) //通讯中有中文简单处理
+		recvBuff += string(gBbuff)
 		recvBuffLen := len(recvBuff)
 
 		if c.packProto != nil {
@@ -181,6 +189,8 @@ func (c *Connection) Stop() {
 	c.ExitChan <- true
 	close(c.ExitChan)
 	close(c.dataChan)
+
+	c.connWg.Done() //连接wg -1
 	c.server.GetManager().Del(c)
 }
 
@@ -208,6 +218,7 @@ func (c *Connection) Send(data []byte) error {
 	if c.packProto != nil {
 		data = c.packProto.Pack(data)
 	}
+	data, _ = Utf8ToGb(data) //处理中文
 	c.dataChan <- data
 	return nil
 }
@@ -242,4 +253,22 @@ func (c *Connection) DelProperty(key string) {
 
 func (c *Connection) SetProtoPack(proto IPack) {
 	c.packProto = proto
+}
+
+func GbToUtf8(s []byte) ([]byte, error) {
+	reader := transform.NewReader(bytes.NewReader(s), simplifiedchinese.GBK.NewDecoder())
+	d, e := ioutil.ReadAll(reader)
+	if e != nil {
+		return nil, e
+	}
+	return d, nil
+}
+
+func Utf8ToGb(s []byte) ([]byte, error) {
+	reader := transform.NewReader(bytes.NewReader(s), simplifiedchinese.GBK.NewEncoder())
+	d, e := ioutil.ReadAll(reader)
+	if e != nil {
+		return nil, e
+	}
+	return d, nil
 }

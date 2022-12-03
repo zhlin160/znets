@@ -3,10 +3,12 @@ package znets
 import (
 	"encoding/hex"
 	"fmt"
+	"io/ioutil"
 	"net"
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cast"
@@ -25,12 +27,13 @@ type Options struct {
 	Model          string //运行模式 dev|production
 	MaxConnNum     uint32
 	WorkPool       uint32
+	PidFilePath    string //pid保存路径
 }
 
 type Server struct {
 	IP             string
 	Port           int
-	Conn           *net.TCPListener
+	Conn           *Listener
 	IPVersion      string
 	Handles        *Handler
 	Version        string
@@ -46,9 +49,13 @@ type Server struct {
 
 	config   *viper.Viper //配置文件对象
 	runModel string       //运行模式 dev|production
+
+	pidFilePath string //pid保存路径
+
+	isExit bool //循环监听中是否需要退出
 }
 
-var version string = "v1.0.0"
+var version string = "v1.0.2"
 var Log *HLog
 
 //通过配置文件构建默认server
@@ -59,8 +66,9 @@ func NewServer() *Server {
 	model := config.GetString("Server.Model")
 	maxConnNum := config.GetUint32("Server.MaxConnNum")
 	workPool := config.GetUint32("Server.WorkPoll")
+	pidFilePath := config.GetString("Server.PidFilePath")
 
-	return buildServ(ip, port, model, maxConnNum, workPool, config)
+	return buildServ(ip, port, model, maxConnNum, workPool, pidFilePath, config)
 }
 
 //使用Options字段构建server
@@ -70,11 +78,12 @@ func NewServerWithOptions(options *Options) *Server {
 	model := options.Model
 	maxConnNum := options.MaxConnNum
 	workPool := options.WorkPool
+	pidFilePath := options.PidFilePath
 
-	return buildServ(ip, port, model, maxConnNum, workPool, nil)
+	return buildServ(ip, port, model, maxConnNum, workPool, pidFilePath, nil)
 }
 
-func buildServ(ip string, port int, model string, maxConnNum, workPool uint32, config *viper.Viper) *Server {
+func buildServ(ip string, port int, model string, maxConnNum, workPool uint32, pidFilePath string, config *viper.Viper) *Server {
 	if ip == "" {
 		ip = "0.0.0.0"
 	}
@@ -90,6 +99,11 @@ func buildServ(ip string, port int, model string, maxConnNum, workPool uint32, c
 	if workPool == 0 {
 		workPool = 10
 	}
+
+	if len(pidFilePath) == 0 {
+		path, _ := os.Getwd()
+		pidFilePath = path + "/pid"
+	}
 	Log = NewLogWithModel(model)
 	s := &Server{
 		IP:             ip,
@@ -102,6 +116,8 @@ func buildServ(ip string, port int, model string, maxConnNum, workPool uint32, c
 		Handles:        NewHandler(),
 		manager:        NewManager(),
 		runModel:       model,
+		pidFilePath:    pidFilePath,
+		isExit:         false,
 	}
 	if config != nil {
 		s.SetConfig(config)
@@ -138,6 +154,16 @@ func (s *Server) start() {
 		return
 	}
 
+	op, err := s.checkOp()
+	if err != nil {
+		Log.Error(err.Error())
+		return
+	}
+	//不是开始服务到这一步就结束了
+	if op != "start" {
+		return
+	}
+
 	//获取TCP地址
 	addr, err := net.ResolveTCPAddr(s.IPVersion, fmt.Sprintf("%s:%d", s.IP, s.Port))
 	if err != nil {
@@ -146,22 +172,31 @@ func (s *Server) start() {
 	}
 
 	//监听服务器地址
-	s.Conn, err = net.ListenTCP(s.IPVersion, addr)
+	s.Conn, err = ListenTCP(s.IPVersion, addr, s)
 	if err != nil {
 		Log.Error("Listen tcp err:" + err.Error())
 		return
 	}
 
+	s.writePid(os.Getpid()) //写入进程id
+
 	//监听成功输出
-	Log.Info("Start server success...")
-	Log.Info(" Server listen on %s:%d", s.IP, s.Port)
+	Log.Info("Start server success..., listen on %s:%d", s.IP, s.Port)
 	//开启工作池
 	s.Handles.RunWorkPool()
 	//循环接受用户连接
 	for {
-		con, err := s.Conn.AcceptTCP()
+		if s.isExit {
+			s.Conn.Close()
+			break
+		}
+		con, err := s.Conn.Accept()
 		if err != nil {
-			Log.Error("Accept err:%s", err.Error())
+			Log.Error("Accept err:%s", err)
+			if strings.Contains(err.Error(), " use of closed network connection") {
+				Log.Info("连接已关闭")
+				break
+			}
 			continue
 		}
 
@@ -173,7 +208,7 @@ func (s *Server) start() {
 			continue
 		}
 
-		dealCon := NewConnection(s, con, s.cid, s.Handles)
+		dealCon := NewConnection(s, con, s.cid, s.Handles, s.Conn.wg)
 		dealCon.SetProtoPack(s.protoPack)
 		s.cid++
 		go dealCon.Start()
@@ -270,6 +305,80 @@ func (s *Server) SetProtoPack(proto IPack) {
 //返回配置对象
 func (s Server) GetConfig() *viper.Viper {
 	return s.config
+}
+
+//写入pid文件
+func (s *Server) writePid(pid int) {
+	fmt.Println("路径：" + s.pidFilePath)
+	ioutil.WriteFile(s.pidFilePath, []byte(strconv.Itoa(pid)), 0777)
+}
+
+//获取pid文件
+func (s *Server) getPid() (int, error) {
+	res, err := ioutil.ReadFile(s.pidFilePath)
+	if err != nil {
+		//Log.Info("获取pid文件内容失败：%s", err.Error())
+		return 0, err
+	}
+	pid, _ := strconv.Atoi(string(res))
+	return pid, nil
+}
+
+//检查启动命令 options
+func (s *Server) checkOp() (string, error) {
+	args := os.Args
+
+	if len(args) < 2 {
+		return "", fmt.Errorf("must set up operation parameters start | restart | stop")
+	}
+
+	op := args[1]
+
+	if op != "start" && op != "restart" && op != "stop" {
+		return "", fmt.Errorf("the operation parameters can be to start | restart | stop")
+	}
+
+	pid, _ := s.getPid()
+	switch op {
+	case "start":
+		isGracefulEvn := "IS_GRACEFUL=1"
+		isGraceful := false
+
+		for _, value := range os.Environ() {
+			if value == isGracefulEvn {
+				isGraceful = true
+			}
+		}
+		if pid != 0 && !isGraceful {
+			return "", fmt.Errorf("the Server is running")
+		}
+
+		return "start", nil
+
+	case "restart":
+		if pid == 0 {
+			return "", fmt.Errorf("the Server is not running")
+		}
+
+		err := syscall.Kill(pid, syscall.SIGUSR2)
+		if err != nil {
+			return "", fmt.Errorf("restart server err:%s", err.Error())
+		}
+		return "reload", nil
+
+	case "stop":
+		if pid == 0 {
+			Log.Error("The Server is not running!!!")
+			return "", fmt.Errorf("the Server is not running")
+		}
+		err := syscall.Kill(pid, syscall.SIGTERM)
+		if err != nil {
+			Log.Error("stop server err:%s", err.Error())
+			return "", fmt.Errorf("stop server err:%s", err.Error())
+		}
+		return "stop", nil
+	}
+	return "", nil
 }
 
 //连接端封装程clientId

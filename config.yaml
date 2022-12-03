@@ -4,3 +4,4 @@ Server:
   WorkPoll: 10     #工作池大小
   MaxConnNum: 102400 #最大连接数
   Model: "dev"
+  PidFilePath: ""  #pid文件保存路径,默认当前运行目录
